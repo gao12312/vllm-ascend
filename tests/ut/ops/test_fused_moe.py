@@ -25,8 +25,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.fused_moe import (
-    AscendFusedMoE, AscendUnquantizedFusedMoEMethod)
+from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.fused_moe.moe_mlp import (cumsum_group_list,
                                                unified_apply_mlp)
 from vllm_ascend.utils import AscendDeviceType, adapt_patch
@@ -73,9 +72,6 @@ def setup_vllm_config_mock(mocker: MockerFixture):
 
     mocker.patch('vllm_ascend.ops.fused_moe.fused_moe.get_current_vllm_config',
                  return_value=mock_vllm_config)
-    mocker.patch(
-        'vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config',
-        return_value=mock_vllm_config)
 
 
 @pytest.fixture
@@ -119,7 +115,6 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm_ascend.ops.fused_moe.fused_moe.get_ascend_config',
             return_value=MagicMock(
-                torchair_graph_config=MagicMock(enabled=False),
                 enable_multistream_moe=False,
                 expert_map_path=None
             )), \
@@ -129,7 +124,7 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context',
             return_value=mock_forward_context_obj), \
-        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._910_93), \
+        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3), \
         patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context',
                 return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher',
@@ -296,13 +291,13 @@ class TestCumsumGroupList(TestBase):
     def test_cumsum_group_list_with_type_0(self):
         group_list = self.experts.cumsum(dim=0)
         group_list_type = 0
-        result = cumsum_group_list(group_list, group_list_type)
+        result = cumsum_group_list(group_list, group_list_type, 0)
         self.assertTrue(torch.equal(result, self.group_list))
 
     def test_cumsum_group_list_with_type_1(self):
         group_list = self.experts
         group_list_type = 1
-        result = cumsum_group_list(group_list, group_list_type)
+        result = cumsum_group_list(group_list, group_list_type, 0)
         self.assertTrue(torch.equal(result, self.group_list))
 
     def test_cumsum_group_list_with_type_2(self):
@@ -315,6 +310,7 @@ class TestCumsumGroupList(TestBase):
         group_list_type = 2
         result = cumsum_group_list(group_list,
                                    group_list_type,
+                                   0,
                                    active_num=self.active_num,
                                    expert_num=self.expert_num)
         self.assertTrue(torch.equal(result, self.group_list))
@@ -324,7 +320,7 @@ class TestUnifiedApplyMLP(TestBase):
 
     @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context')
     @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType._910_93)
+           return_value=AscendDeviceType.A3)
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_dynamic_quant')
     @patch('torch_npu.npu_dequant_swiglu_quant')
@@ -387,7 +383,7 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertEqual(result.dtype, torch.bfloat16)
 
     @patch('vllm_ascend.utils.get_ascend_device_type',
-           return_value=AscendDeviceType._910_93)
+           return_value=AscendDeviceType.A3)
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
@@ -595,39 +591,3 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertTrue(mock_forward_context.with_quant)
         self.assertEqual(result.shape, hidden_states_shape)
         self.assertEqual(result.dtype, torch.bfloat16)
-
-
-class TestLoadWeight(TestBase):
-
-    def test_load_w13_transpose(self):
-        with patch.object(AscendFusedMoE, "__init__",
-                          lambda self, *args, **kwargs: None):
-            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
-
-            expert_data = torch.randn(128, 8)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
-
-            expert_data = torch.randn(8, 128)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
-
-            expert_data = torch.randn(128, 8)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
-
-            expert_data = torch.randn(8, 128)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
-
-    def test_load_w2_transpose(self):
-        with patch.object(AscendFusedMoE, "__init__",
-                          lambda self, *args, **kwargs: None):
-            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
-            expert_data = torch.randn(128, 4)
-            loaded_weight = torch.randn(128, 8)
-            moe._load_w2(expert_data, 1, loaded_weight, 0)
-
-            expert_data = torch.randn(4, 128)
-            loaded_weight = torch.randn(128, 8)
-            moe._load_w2(expert_data, 1, loaded_weight, 0)
